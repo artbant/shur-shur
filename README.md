@@ -1,49 +1,24 @@
-# Rustle · тактильный шум
+# Rustle
 
-Интерактивная веб-штука с настоящей физической деформацией: полиэтиленовый пакет, который реально мнётся там, где трогаешь. Карманный антистресс, работает на телефоне.
+A tactile web toy: a plastic bag you can crumple, rub, and shake until it collapses into a tiny ball.
 
-## Что внутри
+Built with a 352-vertex physics mesh, procedural pink-noise audio, and device haptics. Zero dependencies — everything lives in a single `index.html`.
 
-- **Mesh-деформация** — 352 вершины, 660 треугольников, настоящая spring-физика
-- **Синтез шуршания** через Web Audio (розовый шум + полосовой фильтр)
-- **Отдельный sustained-режим** — непрерывное «шшш» при движении пальцем
-- **Вибрация** (Android/desktop) — короткий пульс на каждое касание
-- **Гироскоп** (iOS/Android) — тряси телефон, пакет реагирует
-- **Счётчик касаний** и полное сминание на 150-м
+## Controls
 
-## Как запустить
+- **Tap** — local rustle at that point
+- **Drag** — sustained rub sound, trail of creases
+- **Shake** — multiple impacts (requires gyro permission on iOS)
+- **Volume** slider — adjust rustle loudness
+- **Smooth** button — reset after 5+ touches
 
-**Локально:** открой `index.html` в браузере. Всё.
+Fully collapses into a crumpled ball at 150 touches.
 
-**На GitHub Pages:**
+## Notes
 
-1. Создай новый репозиторий на GitHub (например, `rustle`)
-2. Залей в него `index.html` и `README.md`
-3. В настройках репозитория: Settings → Pages → Source: `Deploy from a branch` → `main` / `/ (root)` → Save
-4. Через 1–2 минуты сайт будет доступен по адресу `https://твой-юзернейм.github.io/rustle/`
+- Vibration does not work in iOS Safari (Apple hasn't implemented the Vibration API)
+- Gyroscope on iOS 13+ requires explicit permission — tap the `gyro` button to trigger the system prompt
 
-**На любом другом хостинге:** просто загрузи `index.html` куда угодно — Netlify, Vercel, Cloudflare Pages, свой сервер. Зависимостей нет, всё встроено в один файл (включая картинку пакета через base64).
+## Credits
 
-## Как использовать
-
-- **Тап** — локальный хруст в точке касания
-- **Провести пальцем** — непрерывное шуршание + дорожка смятия по траектории
-- **Тряска** (после активации гироскопа) — несколько хрустов в случайных местах
-- **Регулятор справа** — громкость
-- **Кнопка «разгладить»** (появляется после 5 касаний) — сброс
-
-## Особенности работы
-
-- **Вибрация** не работает в iOS Safari (Apple не реализует Vibration API)
-- **Гироскоп на iOS 13+** требует явного разрешения — при первом нажатии на кнопку появится системный запрос
-- Всё остальное работает во всех современных браузерах
-
-## Структура
-
-```
-rustle/
-├── index.html   — всё приложение (вся логика, стили, картинка base64)
-└── README.md    — этот файл
-```
-
-Один файл, никаких зависимостей, никакого сервера, никакой сборки.
+Made as a minimal tactile-noise experiment.
