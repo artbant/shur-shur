@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a10">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Rustle — tactile noise</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #050508;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+    color: #e8e6e0;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  #app {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at 50% 40%, #1a1a22 0%, #050508 85%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  .header {
+    position: absolute;
+    top: env(safe-area-inset-top, 16px);
+    left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 5;
+    padding-top: 16px;
+  }
+  .header-text {
+    font-size: 11px;
+    letter-spacing: 0.35em;
+    color: rgba(232,230,224,0.45);
+    text-transform: uppercase;
+  }
+  .panel-left {
+    position: absolute;
+    top: calc(env(safe-area-inset-top, 0px) + 44px);
+    left: calc(env(safe-area-inset-left, 0px) + 16px);
+    z-index: 4;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .panel-right {
+    position: absolute;
+    top: calc(env(safe-area-inset-top, 0px) + 44px);
+    right: calc(env(safe-area-inset-right, 0px) + 16px);
+    z-index: 4;
+    width: 90px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+  }
+  .panel-label {
+    font-size: 9px;
+    letter-spacing: 0.2em;
+    color: rgba(232,230,224,0.4);
+    text-transform: uppercase;
+  }
+  #counter {
+    font-size: 30px;
+    font-weight: 300;
+    color: #e8e6e0;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .progress-bar {
+    width: 80px;
+    height: 2px;
+    background: rgba(232,230,224,0.1);
+    border-radius: 1px;
+    overflow: hidden;
+  }
+  #progress-fill {
+    width: 0%;
+    height: 100%;
+    background: #e8e6e0;
+    transition: width 0.2s;
+  }
+  #progress-label {
+    font-size: 9px;
+    color: rgba(232,230,224,0.35);
+    letter-spacing: 0.1em;
+    font-variant-numeric: tabular-nums;
+  }
+  button {
+    background: transparent;
+    border: 0.5px solid rgba(232,230,224,0.2);
+    color: rgba(232,230,224,0.5);
+    font-size: 10px;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    letter-spacing: 0.1em;
+    text-transform: lowercase;
+    transition: all 0.15s;
+  }
+  button:active { transform: scale(0.96); }
+  button:hover { color: rgba(232,230,224,0.8); border-color: rgba(232,230,224,0.4); }
+  #reset-btn { margin-top: 2px; display: none; }
+  #gyro-btn { margin-top: 8px; }
+  input[type="range"] {
+    width: 90px;
+    accent-color: #e8e6e0;
+    background: transparent;
+  }
+  #vol-readout {
+    font-size: 10px;
+    color: rgba(232,230,224,0.4);
+    font-variant-numeric: tabular-nums;
+  }
+  #stage {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    touch-action: none;
+  }
+  #bag-canvas {
+    filter: drop-shadow(0 30px 40px rgba(0,0,0,0.55));
+    max-width: 90vw;
+    max-height: 80vh;
+    width: 340px;
+    height: 480px;
+  }
+  #bag-source { display: none; }
+  .footer {
+    position: absolute;
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 16px);
+    left: 0; right: 0;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 5;
+  }
+  #hint {
+    font-size: 11px;
+    color: rgba(232,230,224,0.4);
+    letter-spacing: 0.18em;
+    transition: opacity 0.5s;
+    text-align: center;
+    padding: 0 16px;
+  }
+  @media (max-width: 400px) {
+    #bag-canvas { width: 88vw; height: auto; aspect-ratio: 340/480; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="header">
+    <div class="header-text">rustle</div>
+  </div>
+
+  <div class="panel-left">
+    <div class="panel-label">touches</div>
+    <div id="counter">0</div>
+    <div class="progress-bar">
+      <div id="progress-fill"></div>
+    </div>
+    <div id="progress-label">0 / 150</div>
+    <button id="reset-btn">smooth</button>
+  </div>
+
+  <div class="panel-right">
+    <div class="panel-label">volume</div>
+    <input type="range" id="volume" min="0" max="100" value="70">
+    <div id="vol-readout">70</div>
+    <button id="gyro-btn">gyro</button>
+  </div>
+
+  <div id="stage">
+    <canvas id="bag-canvas" width="680" height="960"></canvas>
+    <img id="bag-source" src="data:image/webp;base64,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" crossorigin="anonymous" alt="">
+  </div>
+
+  <div class="footer">
+    <div id="hint">bant</div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const canvas = document.getElementById('bag-canvas');
+  const ctx = canvas.getContext('2d');
+  const img = document.getElementById('bag-source');
+  const stage = document.getElementById('stage');
+  const volSlider = document.getElementById('volume');
+  const volReadout = document.getElementById('vol-readout');
+  const counter = document.getElementById('counter');
+  const progressFill = document.getElementById('progress-fill');
+  const progressLabel = document.getElementById('progress-label');
+  const resetBtn = document.getElementById('reset-btn');
+  const gyroBtn = document.getElementById('gyro-btn');
+  const hint = document.getElementById('hint');
+
+  const SCALE = 2;
+  const DISP_W = 340, DISP_H = 480;
+  const CANVAS_W = DISP_W * SCALE, CANVAS_H = DISP_H * SCALE;
+
+  const COLS = 16;
+  const ROWS = 22;
+  const NV = COLS * ROWS;
+
+  const BAG_LEFT = 15, BAG_TOP = 15, BAG_RIGHT = 325, BAG_BOTTOM = 465;
+  const BAG_W = BAG_RIGHT - BAG_LEFT, BAG_H = BAG_BOTTOM - BAG_TOP;
+
+  const restX = new Float32Array(NV);
+  const restY = new Float32Array(NV);
+  const posX = new Float32Array(NV);
+  const posY = new Float32Array(NV);
+  const velX = new Float32Array(NV);
+  const velY = new Float32Array(NV);
+  const uvU = new Float32Array(NV);
+  const uvV = new Float32Array(NV);
+  const permX = new Float32Array(NV);
+  const permY = new Float32Array(NV);
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const i = r * COLS + c;
+      const u = c / (COLS - 1);
+      const v = r / (ROWS - 1);
+      const x = BAG_LEFT + u * BAG_W;
+      const y = BAG_TOP + v * BAG_H;
+      restX[i] = x; restY[i] = y;
+      posX[i] = x; posY[i] = y;
+      uvU[i] = u; uvV[i] = v;
+    }
+  }
+
+  const triangles = [];
+  for (let r = 0; r < ROWS - 1; r++) {
+    for (let c = 0; c < COLS - 1; c++) {
+      const tl = r * COLS + c;
+      const tr = r * COLS + (c + 1);
+      const bl = (r + 1) * COLS + c;
+      const br = (r + 1) * COLS + (c + 1);
+      triangles.push([tl, tr, br]);
+      triangles.push([tl, br, bl]);
+    }
+  }
+
+  let count = 0;
+  const CRUMPLE_THRESHOLD = 150;
+  let isCrumpled = false;
+  let imgReady = false;
+  img.onload = () => { imgReady = true; render(); };
+  if (img.complete && img.naturalWidth > 0) { imgReady = true; }
+
+  const SPRING_K = 0.15;
+  const NEIGHBOR_K = 0.08;
+  const DAMPING = 0.82;
+  const PERM_DECAY = 0.998;
+  const MAX_VEL = 40;
+
+  function drawTriangle(i0, i1, i2) {
+    const sx0 = uvU[i0] * img.naturalWidth, sy0 = uvV[i0] * img.naturalHeight;
+    const sx1 = uvU[i1] * img.naturalWidth, sy1 = uvV[i1] * img.naturalHeight;
+    const sx2 = uvU[i2] * img.naturalWidth, sy2 = uvV[i2] * img.naturalHeight;
+    const dx0 = posX[i0] * SCALE, dy0 = posY[i0] * SCALE;
+    const dx1 = posX[i1] * SCALE, dy1 = posY[i1] * SCALE;
+    const dx2 = posX[i2] * SCALE, dy2 = posY[i2] * SCALE;
+    const denom = (sx1 - sx0) * (sy2 - sy0) - (sy1 - sy0) * (sx2 - sx0);
+    if (Math.abs(denom) < 0.0001) return;
+    const a = ((dx1 - dx0) * (sy2 - sy0) - (dx2 - dx0) * (sy1 - sy0)) / denom;
+    const c = ((dx2 - dx0) * (sx1 - sx0) - (dx1 - dx0) * (sx2 - sx0)) / denom;
+    const e = dx0 - a * sx0 - c * sy0;
+    const b = ((dy1 - dy0) * (sy2 - sy0) - (dy2 - dy0) * (sy1 - sy0)) / denom;
+    const d = ((dy2 - dy0) * (sx1 - sx0) - (dy1 - dy0) * (sx2 - sx0)) / denom;
+    const f = dy0 - b * sx0 - d * sy0;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(dx0, dy0);
+    ctx.lineTo(dx1, dy1);
+    ctx.lineTo(dx2, dy2);
+    ctx.closePath();
+    ctx.clip();
+    ctx.transform(a, b, c, d, e, f);
+    ctx.drawImage(img, 0, 0);
+    ctx.restore();
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    if (!imgReady) return;
+    for (let t = 0; t < triangles.length; t++) {
+      const tri = triangles[t];
+      drawTriangle(tri[0], tri[1], tri[2]);
+    }
+  }
+
+  function step() {
+    for (let i = 0; i < NV; i++) {
+      const targetX = restX[i] + permX[i];
+      const targetY = restY[i] + permY[i];
+      velX[i] += (targetX - posX[i]) * SPRING_K;
+      velY[i] += (targetY - posY[i]) * SPRING_K;
+    }
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const i = r * COLS + c;
+        let sumX = 0, sumY = 0, cnt = 0;
+        if (c > 0) { const n = i - 1; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
+        if (c < COLS - 1) { const n = i + 1; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
+        if (r > 0) { const n = i - COLS; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
+        if (r < ROWS - 1) { const n = i + COLS; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
+        if (cnt > 0) { velX[i] += (sumX / cnt) * NEIGHBOR_K; velY[i] += (sumY / cnt) * NEIGHBOR_K; }
+      }
+    }
+    let maxDelta = 0;
+    for (let i = 0; i < NV; i++) {
+      velX[i] *= DAMPING;
+      velY[i] *= DAMPING;
+      if (velX[i] > MAX_VEL) velX[i] = MAX_VEL; else if (velX[i] < -MAX_VEL) velX[i] = -MAX_VEL;
+      if (velY[i] > MAX_VEL) velY[i] = MAX_VEL; else if (velY[i] < -MAX_VEL) velY[i] = -MAX_VEL;
+      posX[i] += velX[i];
+      posY[i] += velY[i];
+      const d = Math.abs(velX[i]) + Math.abs(velY[i]);
+      if (d > maxDelta) maxDelta = d;
+    }
+    for (let i = 0; i < NV; i++) {
+      permX[i] *= PERM_DECAY;
+      permY[i] *= PERM_DECAY;
+    }
+    return maxDelta;
+  }
+
+  let rafId = null;
+  function loop() {
+    rafId = null;
+    const delta = step();
+    render();
+    if (delta > 0.05) rafId = requestAnimationFrame(loop);
+  }
+  function kickLoop() {
+    if (rafId === null) rafId = requestAnimationFrame(loop);
+  }
+
+  function applyImpact(px, py, intensity) {
+    const radius = 55 + intensity * 40;
+    const r2 = radius * radius;
+    const strength = 22 + intensity * 30;
+    const seed = Math.random() * 1000;
+    for (let i = 0; i < NV; i++) {
+      const dx = posX[i] - px;
+      const dy = posY[i] - py;
+      const dist2 = dx*dx + dy*dy;
+      if (dist2 > r2) continue;
+      const dist = Math.sqrt(dist2);
+      const falloff = 1 - dist / radius;
+      const fall = falloff * falloff;
+      const ang = Math.atan2(dy, dx) + (Math.random() - 0.5) * 3.0;
+      const n = Math.sin(posX[i] * 0.15 + seed) * Math.cos(posY[i] * 0.15 + seed * 0.7);
+      const n2 = Math.sin((posX[i] + posY[i]) * 0.08 + seed);
+      const dirX = Math.cos(ang) + n * 0.7;
+      const dirY = Math.sin(ang) + n2 * 0.7;
+      velX[i] += dirX * strength * fall * 0.4;
+      velY[i] += dirY * strength * fall * 0.4;
+      permX[i] += dirX * strength * fall * 0.35;
+      permY[i] += dirY * strength * fall * 0.35;
+      const curMag = Math.sqrt(permX[i]*permX[i] + permY[i]*permY[i]);
+      const maxPerm = isCrumpled ? 300 : 25;
+      if (curMag > maxPerm) {
+        permX[i] *= maxPerm / curMag;
+        permY[i] *= maxPerm / curMag;
+      }
+    }
+    kickLoop();
+  }
+
+  let audioCtx = null, masterGain = null, rubSource = null, rubGain = null, rubFilter = null;
+  function initAudio() {
+    if (audioCtx) return;
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = parseFloat(volSlider.value) / 100 * 0.45;
+      masterGain.connect(audioCtx.destination);
+      const bufSize = audioCtx.sampleRate * 2;
+      const noiseBuf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      let b0=0,b1=0,b2=0,b3=0,b4=0,b5=0,b6=0;
+      for (let i = 0; i < bufSize; i++) {
+        const white = Math.random() * 2 - 1;
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.96900 * b2 + white * 0.1538520;
+        b3 = 0.86650 * b3 + white * 0.3104856;
+        b4 = 0.55000 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.0168980;
+        d[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.15;
+        b6 = white * 0.115926;
+      }
+      rubSource = audioCtx.createBufferSource();
+      rubSource.buffer = noiseBuf;
+      rubSource.loop = true;
+      rubFilter = audioCtx.createBiquadFilter();
+      rubFilter.type = 'bandpass';
+      rubFilter.frequency.value = 3200;
+      rubFilter.Q.value = 0.8;
+      rubGain = audioCtx.createGain();
+      rubGain.gain.value = 0;
+      rubSource.connect(rubFilter);
+      rubFilter.connect(rubGain);
+      rubGain.connect(masterGain);
+      rubSource.start();
+    } catch (e) {}
+  }
+  function playRustleBurst(intensity) {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const duration = 0.2 + Math.random() * 0.4 + intensity * 0.3;
+    const bufferSize = Math.floor(audioCtx.sampleRate * duration);
+    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let b0=0,b1=0,b2=0,b3=0,b4=0,b5=0,b6=0;
+    const attackSamples = Math.floor(bufferSize * 0.08);
+    for (let i = 0; i < bufferSize; i++) {
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.96900 * b2 + white * 0.1538520;
+      b3 = 0.86650 * b3 + white * 0.3104856;
+      b4 = 0.55000 * b4 + white * 0.5329522;
+      b5 = -0.7616 * b5 - white * 0.0168980;
+      let sample = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362) * 0.12;
+      b6 = white * 0.115926;
+      let env;
+      if (i < attackSamples) env = i / attackSamples;
+      else {
+        const t = (i - attackSamples) / (bufferSize - attackSamples);
+        env = Math.pow(1 - t, 1.4);
+      }
+      const click = Math.random() < 0.006 ? (Math.random() - 0.5) * 0.6 : 0;
+      data[i] = (sample + click) * env * (0.55 + intensity * 0.45);
+    }
+    const src = audioCtx.createBufferSource();
+    src.buffer = buffer;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 2800 + Math.random() * 2200;
+    bp.Q.value = 0.7 + Math.random() * 0.5;
+    const shelf = audioCtx.createBiquadFilter();
+    shelf.type = 'highshelf';
+    shelf.frequency.value = 5000;
+    shelf.gain.value = 3;
+    const g = audioCtx.createGain();
+    g.gain.value = 0.6 + intensity * 0.4;
+    src.connect(bp); bp.connect(shelf); shelf.connect(g); g.connect(masterGain);
+    src.start(now);
+    src.stop(now + duration);
+  }
+  function updateRubRustle(speed) {
+    if (!rubGain || !rubFilter) return;
+    const targetGain = Math.min(0.55, speed * 0.3);
+    const now = audioCtx.currentTime;
+    rubGain.gain.cancelScheduledValues(now);
+    rubGain.gain.linearRampToValueAtTime(targetGain, now + 0.05);
+    rubFilter.frequency.cancelScheduledValues(now);
+    rubFilter.frequency.linearRampToValueAtTime(2500 + speed * 800, now + 0.08);
+  }
+  function stopRubRustle() {
+    if (!rubGain) return;
+    const now = audioCtx.currentTime;
+    rubGain.gain.cancelScheduledValues(now);
+    rubGain.gain.linearRampToValueAtTime(0, now + 0.15);
+  }
+  function vibrate(intensity) {
+    if (!navigator.vibrate) return;
+    try { navigator.vibrate(Math.round(8 + intensity * 35)); } catch (e) {}
+  }
+
+  function updateCounter() {
+    counter.textContent = count;
+    const progress = Math.min(1, count / CRUMPLE_THRESHOLD);
+    progressFill.style.width = (progress * 100) + '%';
+    progressLabel.textContent = count + ' / ' + CRUMPLE_THRESHOLD;
+    if (count >= 5 && resetBtn.style.display === 'none') resetBtn.style.display = 'block';
+  }
+
+  function doRustle(px, py, intensity) {
+    initAudio();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    count++;
+    updateCounter();
+    if (count >= CRUMPLE_THRESHOLD && !isCrumpled) {
+      triggerFullCrumple();
+      return;
+    }
+    applyImpact(px, py, intensity);
+    playRustleBurst(intensity);
+    vibrate(intensity);
+    if (hint.style.opacity !== '0') hint.style.opacity = '0';
+  }
+
+  function triggerFullCrumple() {
+    isCrumpled = true;
+    const cx = BAG_LEFT + BAG_W / 2;
+    const cy = BAG_TOP + BAG_H / 2;
+    // Collapse: every vertex gets pulled to center, with chaotic offset
+    // Shrink factor: 0.28 means bag becomes ~28% of its size (small crumpled ball)
+    const SHRINK = 0.28;
+    for (let i = 0; i < NV; i++) {
+      // Direction from center to rest position
+      const dxr = restX[i] - cx;
+      const dyr = restY[i] - cy;
+      // New target: scaled down toward center + chaotic crumple offset
+      const chaosAng = Math.random() * Math.PI * 2;
+      const chaosMag = 8 + Math.random() * 18;
+      const chaosX = Math.cos(chaosAng) * chaosMag;
+      const chaosY = Math.sin(chaosAng) * chaosMag;
+      // permX/permY are OFFSETS from rest position, so:
+      // new position = rest + perm = (cx + dxr*SHRINK + chaos)
+      // so perm = (cx + dxr*SHRINK + chaos) - rest = -dxr*(1-SHRINK) + chaos
+      permX[i] = -dxr * (1 - SHRINK) + chaosX;
+      permY[i] = -dyr * (1 - SHRINK) + chaosY;
+      // Add violent velocity kick toward center
+      velX[i] += -dxr * 0.12 + (Math.random() - 0.5) * 20;
+      velY[i] += -dyr * 0.12 + (Math.random() - 0.5) * 20;
+    }
+    // Raise the permanent-offset clamp so the collapse survives future taps
+    // (handled by new MAX_PERM_CRUMPLED in applyImpact via global flag)
+    kickLoop();
+    for (let i = 0; i < 8; i++) {
+      setTimeout(() => playRustleBurst(0.8 + Math.random() * 0.2), i * 90);
+    }
+    if (navigator.vibrate) {
+      try { navigator.vibrate([80, 30, 100, 30, 80, 30, 60, 30, 160]); } catch (e) {}
+    }
+    hint.textContent = 'bant';
+    hint.style.opacity = '0.6';
+  }
+
+  function resetBag() {
+    count = 0;
+    isCrumpled = false;
+    updateCounter();
+    progressFill.style.width = '0%';
+    for (let i = 0; i < NV; i++) {
+      posX[i] = restX[i];
+      posY[i] = restY[i];
+      velX[i] = 0; velY[i] = 0;
+      permX[i] = 0; permY[i] = 0;
+    }
+    render();
+    resetBtn.style.display = 'none';
+    hint.textContent = 'bant';
+    hint.style.opacity = '0.4';
+  }
+
+  resetBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    playRustleBurst(0.25);
+    resetBag();
+  });
+
+  function eventToLocal(e) {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (DISP_W / rect.width);
+    const y = (e.clientY - rect.top) * (DISP_H / rect.height);
+    return { x, y };
+  }
+
+  let lastPointer = { x: 0, y: 0, t: 0 };
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
+    e.preventDefault();
+    const p = eventToLocal(e);
+    lastPointer = { x: p.x, y: p.y, t: performance.now() };
+    const pressure = e.pressure > 0 ? e.pressure : 0.5;
+    const intensity = Math.min(1, 0.55 + pressure * 0.45 + Math.random() * 0.1);
+    doRustle(p.x, p.y, intensity);
+  });
+
+  stage.addEventListener('pointerup', () => { stopRubRustle(); });
+  stage.addEventListener('pointercancel', () => { stopRubRustle(); });
+  stage.addEventListener('pointerleave', () => { stopRubRustle(); });
+
+  let rubCooldown = 0;
+  stage.addEventListener('pointermove', (e) => {
+    if (!(e.buttons > 0 || e.pressure > 0)) { stopRubRustle(); return; }
+    const now = performance.now();
+    const dt = now - lastPointer.t;
+    if (dt < 14) return;
+    const p = eventToLocal(e);
+    const dx = p.x - lastPointer.x;
+    const dy = p.y - lastPointer.y;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    const speed = dist / dt;
+    lastPointer = { x: p.x, y: p.y, t: now };
+    if (speed > 0.1) { initAudio(); updateRubRustle(speed); } else { stopRubRustle(); }
+    if (speed > 0.25 && now > rubCooldown) {
+      const intensity = Math.min(1, 0.3 + speed * 0.5);
+      doRustle(p.x, p.y, intensity);
+      rubCooldown = now + 40 + Math.random() * 40;
+    }
+  });
+
+  volSlider.addEventListener('input', () => {
+    const v = parseFloat(volSlider.value);
+    volReadout.textContent = Math.round(v);
+    if (masterGain) masterGain.gain.value = v / 100 * 0.45;
+  });
+
+  let shakeBuf = [];
+  let shakeCooldown = 0;
+  function onMotion(e) {
+    const acc = e.accelerationIncludingGravity || e.acceleration;
+    if (!acc) return;
+    const mag = Math.sqrt((acc.x||0)**2 + (acc.y||0)**2 + (acc.z||0)**2);
+    shakeBuf.push(mag);
+    if (shakeBuf.length > 8) shakeBuf.shift();
+    const avg = shakeBuf.reduce((a,b)=>a+b,0) / shakeBuf.length;
+    const variance = shakeBuf.reduce((a,b)=>a+(b-avg)**2, 0) / shakeBuf.length;
+    const now = performance.now();
+    if (variance > 6 && now > shakeCooldown) {
+      const intensity = Math.min(1, variance / 22);
+      const n = 3 + Math.floor(intensity * 4);
+      for (let i = 0; i < n; i++) {
+        setTimeout(() => {
+          const px = BAG_LEFT + Math.random() * BAG_W;
+          const py = BAG_TOP + Math.random() * BAG_H;
+          doRustle(px, py, intensity * (0.7 + Math.random() * 0.3));
+        }, i * 40);
+      }
+      shakeCooldown = now + 220;
+    }
+  }
+  let gyroActive = false;
+  async function enableGyro() {
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' &&
+          typeof DeviceMotionEvent.requestPermission === 'function') {
+        const perm = await DeviceMotionEvent.requestPermission();
+        if (perm !== 'granted') throw new Error('denied');
+      }
+      window.addEventListener('devicemotion', onMotion);
+      gyroActive = true;
+      gyroBtn.textContent = 'active';
+      gyroBtn.style.color = '#e8e6e0';
+      gyroBtn.style.borderColor = 'rgba(232,230,224,0.5)';
+    } catch (err) {
+      gyroBtn.textContent = 'no access';
+      setTimeout(() => { gyroBtn.textContent = 'gyro'; }, 1500);
+    }
+  }
+  gyroBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (gyroActive) {
+      window.removeEventListener('devicemotion', onMotion);
+      gyroActive = false;
+      gyroBtn.textContent = 'gyro';
+      gyroBtn.style.color = '';
+      gyroBtn.style.borderColor = '';
+    } else {
+      enableGyro();
+    }
+  });
+
+  // Prevent scroll/zoom on iOS
+  document.addEventListener('touchmove', (e) => { e.preventDefault(); }, { passive: false });
+  document.addEventListener('gesturestart', (e) => { e.preventDefault(); });
+
+  if (imgReady) render();
+})();
+</script>
+</body>
+</html>
