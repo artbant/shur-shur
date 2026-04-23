@@ -208,6 +208,48 @@
     }
   }
 
+  // === EDGES and TRIANGLES with breakability ===
+  // edges: array of {a, b, broken} - connections between neighboring vertices
+  // edgeMap: for fast lookup edgeMap[min(a,b)*NV + max(a,b)] = edge index
+  const edges = [];
+  const edgeIndex = new Map();
+  function edgeKey(a, b) { return a < b ? a*NV + b : b*NV + a; }
+  function addEdge(a, b) {
+    const k = edgeKey(a, b);
+    if (edgeIndex.has(k)) return edgeIndex.get(k);
+    const idx = edges.length;
+    edges.push({ a, b, broken: false });
+    edgeIndex.set(k, idx);
+    return idx;
+  }
+  // Horizontal and vertical edges between grid neighbors
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const i = r * COLS + c;
+      if (c < COLS - 1) addEdge(i, i + 1);
+      if (r < ROWS - 1) addEdge(i, i + COLS);
+    }
+  }
+  // Also diagonal edges (inside each cell, the diagonal we triangulate)
+  for (let r = 0; r < ROWS - 1; r++) {
+    for (let c = 0; c < COLS - 1; c++) {
+      const tl = r * COLS + c;
+      const br = (r + 1) * COLS + (c + 1);
+      addEdge(tl, br);  // diagonal
+    }
+  }
+  const NUM_EDGES = edges.length;
+  // Precompute rest length for each edge
+  const edgeRestLen = new Float32Array(NUM_EDGES);
+  for (let e = 0; e < NUM_EDGES; e++) {
+    const a = edges[e].a, b = edges[e].b;
+    const dx = restX[a] - restX[b];
+    const dy = restY[a] - restY[b];
+    edgeRestLen[e] = Math.sqrt(dx*dx + dy*dy);
+  }
+
+  // Triangles with references to their 3 edges
+  // triangle = [vi0, vi1, vi2, edge01, edge12, edge02]
   const triangles = [];
   for (let r = 0; r < ROWS - 1; r++) {
     for (let c = 0; c < COLS - 1; c++) {
@@ -215,14 +257,40 @@
       const tr = r * COLS + (c + 1);
       const bl = (r + 1) * COLS + c;
       const br = (r + 1) * COLS + (c + 1);
-      triangles.push([tl, tr, br]);
-      triangles.push([tl, br, bl]);
+      // Two triangles: TL-TR-BR and TL-BR-BL
+      // Triangle 1: TL, TR, BR
+      triangles.push([
+        tl, tr, br,
+        edgeIndex.get(edgeKey(tl, tr)),
+        edgeIndex.get(edgeKey(tr, br)),
+        edgeIndex.get(edgeKey(tl, br))  // diagonal
+      ]);
+      // Triangle 2: TL, BR, BL
+      triangles.push([
+        tl, br, bl,
+        edgeIndex.get(edgeKey(tl, br)),  // diagonal
+        edgeIndex.get(edgeKey(br, bl)),
+        edgeIndex.get(edgeKey(tl, bl))
+      ]);
     }
   }
+
+  // For each vertex, list of (neighbor_idx, edge_idx) pairs — used in physics
+  const vertexNeighbors = [];
+  for (let i = 0; i < NV; i++) vertexNeighbors.push([]);
+  for (let e = 0; e < NUM_EDGES; e++) {
+    const ed = edges[e];
+    vertexNeighbors[ed.a].push({ n: ed.b, edge: e });
+    vertexNeighbors[ed.b].push({ n: ed.a, edge: e });
+  }
+
+  // Gravity flag per vertex — becomes true for torn-off fragments
+  const gravityActive = new Uint8Array(NV);
 
   let count = 0;
   const CRUMPLE_THRESHOLD = 150;
   let isCrumpled = false;
+  let isTorn = false;
   let imgReady = false;
   let currentBagIdx = 0;
 
@@ -242,6 +310,21 @@
     });
   }
 
+  function resetState() {
+    for (let i = 0; i < NV; i++) {
+      posX[i] = restX[i];
+      posY[i] = restY[i];
+      velX[i] = 0; velY[i] = 0;
+      permX[i] = 0; permY[i] = 0;
+      gravityActive[i] = 0;
+    }
+    for (let e = 0; e < NUM_EDGES; e++) edges[e].broken = false;
+    count = 0;
+    isCrumpled = false;
+    isTorn = false;
+    updateCounter();
+  }
+
   function switchBag(newIdx, direction) {
     if (newIdx < 0 || newIdx >= BAGS.length) return;
     const outClass = direction === 'right' ? 'swipe-out-left' : 'swipe-out-right';
@@ -249,18 +332,9 @@
     canvas.classList.add(outClass);
     setTimeout(() => {
       currentBagIdx = newIdx;
-      const bag = BAGS[currentBagIdx];
-      img.src = bag.src;
+      img.src = BAGS[currentBagIdx].src;
       renderDots();
-      for (let i = 0; i < NV; i++) {
-        posX[i] = restX[i];
-        posY[i] = restY[i];
-        velX[i] = 0; velY[i] = 0;
-        permX[i] = 0; permY[i] = 0;
-      }
-      count = 0;
-      isCrumpled = false;
-      updateCounter();
+      resetState();
       canvas.classList.remove(outClass);
       canvas.classList.add(inClass);
       canvas.offsetWidth;
@@ -277,6 +351,7 @@
   const DAMPING = 0.82;
   const PERM_DECAY = 0.998;
   const MAX_VEL = 40;
+  const GRAVITY = 0.8;  // px/frame^2 for torn fragments
 
   function drawTriangle(i0, i1, i2) {
     const sx0 = uvU[i0] * img.naturalWidth, sy0 = uvV[i0] * img.naturalHeight;
@@ -310,28 +385,38 @@
     if (!imgReady) return;
     for (let t = 0; t < triangles.length; t++) {
       const tri = triangles[t];
+      // Skip triangle if any of its 3 edges is broken — creates the tear visual
+      if (edges[tri[3]].broken || edges[tri[4]].broken || edges[tri[5]].broken) continue;
       drawTriangle(tri[0], tri[1], tri[2]);
     }
   }
 
   function step() {
+    // Spring to rest + permanent offset
     for (let i = 0; i < NV; i++) {
       const targetX = restX[i] + permX[i];
       const targetY = restY[i] + permY[i];
-      velX[i] += (targetX - posX[i]) * SPRING_K;
-      velY[i] += (targetY - posY[i]) * SPRING_K;
+      velX[i] += (targetX - posX[i]) * SPRING_K * (gravityActive[i] ? 0 : 1);
+      velY[i] += (targetY - posY[i]) * SPRING_K * (gravityActive[i] ? 0 : 1);
+      if (gravityActive[i]) velY[i] += GRAVITY;
     }
-    for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
-        const i = r * COLS + c;
-        let sumX = 0, sumY = 0, cnt = 0;
-        if (c > 0) { const n = i - 1; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
-        if (c < COLS - 1) { const n = i + 1; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
-        if (r > 0) { const n = i - COLS; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
-        if (r < ROWS - 1) { const n = i + COLS; sumX += posX[n] - posX[i] + (restX[i] - restX[n]); sumY += posY[n] - posY[i] + (restY[i] - restY[n]); cnt++; }
-        if (cnt > 0) { velX[i] += (sumX / cnt) * NEIGHBOR_K; velY[i] += (sumY / cnt) * NEIGHBOR_K; }
+    // Neighbor constraints via edge list (respects broken edges)
+    for (let i = 0; i < NV; i++) {
+      let sumX = 0, sumY = 0, cnt = 0;
+      const nbrs = vertexNeighbors[i];
+      for (let k = 0; k < nbrs.length; k++) {
+        if (edges[nbrs[k].edge].broken) continue;
+        const n = nbrs[k].n;
+        sumX += posX[n] - posX[i] + (restX[i] - restX[n]);
+        sumY += posY[n] - posY[i] + (restY[i] - restY[n]);
+        cnt++;
+      }
+      if (cnt > 0) {
+        velX[i] += (sumX / cnt) * NEIGHBOR_K;
+        velY[i] += (sumY / cnt) * NEIGHBOR_K;
       }
     }
+    // Integrate + damp
     let maxDelta = 0;
     for (let i = 0; i < NV; i++) {
       velX[i] *= DAMPING;
@@ -346,6 +431,17 @@
     for (let i = 0; i < NV; i++) {
       permX[i] *= PERM_DECAY;
       permY[i] *= PERM_DECAY;
+    }
+    // Keep torn fragments alive until they fall off-screen
+    if (isTorn) {
+      let anyVisible = false;
+      for (let i = 0; i < NV; i++) {
+        if (gravityActive[i] && posY[i] < DISP_H + 100) {
+          anyVisible = true;
+          break;
+        }
+      }
+      if (anyVisible) maxDelta = Math.max(maxDelta, 1);
     }
     return maxDelta;
   }
@@ -367,6 +463,7 @@
     const strength = 22 + intensity * 30;
     const seed = Math.random() * 1000;
     for (let i = 0; i < NV; i++) {
+      if (gravityActive[i]) continue;  // don't push falling pieces
       const dx = posX[i] - px;
       const dy = posY[i] - py;
       const dist2 = dx*dx + dy*dy;
@@ -393,10 +490,71 @@
     kickLoop();
   }
 
-  // === AUDIO: per-bag sonic character ===
-  let audioCtx = null, masterGain = null, rubSource = null, rubGain = null, rubFilter = null, rubPreFilter = null;
+  // === TEAR mechanic ===
+  // Break all edges whose segment crosses a given line segment (x1,y1)-(x2,y2)
+  // Only works after isCrumpled (tearing requires bag to already be stressed/weakened)
+  function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+    // Returns true if segment AB intersects segment CD
+    const d1x = bx - ax, d1y = by - ay;
+    const d2x = dx - cx, d2y = dy - cy;
+    const denom = d1x * d2y - d1y * d2x;
+    if (Math.abs(denom) < 0.0001) return false;
+    const s = ((cx - ax) * d2y - (cy - ay) * d2x) / denom;
+    const t = ((cx - ax) * d1y - (cy - ay) * d1x) / denom;
+    return s >= 0 && s <= 1 && t >= 0 && t <= 1;
+  }
 
-  // Build three noise types: pink (-3dB/oct), white (flat), brown (-6dB/oct)
+  function tearAlongPath(x1, y1, x2, y2) {
+    // Break every edge that crosses this line
+    let broke = 0;
+    for (let e = 0; e < NUM_EDGES; e++) {
+      if (edges[e].broken) continue;
+      const a = edges[e].a, b = edges[e].b;
+      if (segmentsIntersect(x1, y1, x2, y2, posX[a], posY[a], posX[b], posY[b])) {
+        edges[e].broken = true;
+        broke++;
+      }
+    }
+    return broke;
+  }
+
+  function triggerTear(x1, y1, x2, y2) {
+    if (isTorn) return;
+    isTorn = true;
+    // Break edges along the swipe path
+    const broke = tearAlongPath(x1, y1, x2, y2);
+    if (broke === 0) return;
+
+    // Determine which side of the tear line each vertex is on,
+    // give them opposite momentum perpendicular to tear direction
+    const tdx = x2 - x1, tdy = y2 - y1;
+    const tlen = Math.sqrt(tdx*tdx + tdy*tdy) || 1;
+    // Normal vector (perpendicular to tear direction)
+    const nx = -tdy / tlen, ny = tdx / tlen;
+
+    for (let i = 0; i < NV; i++) {
+      // Dot product with normal = which side we're on
+      const rx = posX[i] - (x1 + x2) / 2;
+      const ry = posY[i] - (y1 + y2) / 2;
+      const side = rx * nx + ry * ny;
+      const direction = side > 0 ? 1 : -1;
+      // Impulse perpendicular to tear + gravity activation
+      velX[i] += nx * direction * 6 + (Math.random() - 0.5) * 3;
+      velY[i] += ny * direction * 6 + (Math.random() - 0.5) * 3;
+      // After delay, activate gravity
+      gravityActive[i] = 1;
+    }
+
+    playTearSound();
+    if (navigator.vibrate) {
+      try { navigator.vibrate([20, 15, 40, 20, 80, 20, 60, 15, 200]); } catch(e) {}
+    }
+    kickLoop();
+  }
+
+  // === AUDIO ===
+  let audioCtx = null, masterGain = null, rubSource = null, rubGain = null, rubFilter = null;
+
   function fillPinkNoise(data) {
     let b0=0,b1=0,b2=0,b3=0,b4=0,b5=0,b6=0;
     for (let i = 0; i < data.length; i++) {
@@ -435,7 +593,6 @@
       masterGain = audioCtx.createGain();
       masterGain.gain.value = 0.5;
       masterGain.connect(audioCtx.destination);
-      // sustained rub noise — pre-generated pink, filtered dynamically per bag
       const bufSize = audioCtx.sampleRate * 2;
       const noiseBuf = audioCtx.createBuffer(1, bufSize, audioCtx.sampleRate);
       fillPinkNoise(noiseBuf.getChannelData(0));
@@ -459,7 +616,6 @@
     if (!audioCtx) return;
     const audioProfile = BAGS[currentBagIdx].audio;
     const now = audioCtx.currentTime;
-    // Slight random variation per burst so same bag still sounds varied
     const freqJitter = 0.85 + Math.random() * 0.3;
     const duration = (0.2 + Math.random() * 0.4 + intensity * 0.3) * audioProfile.durMul;
     const bufferSize = Math.floor(audioCtx.sampleRate * duration);
@@ -494,6 +650,86 @@
     src.start(now);
     src.stop(now + duration);
   }
+
+  // Dedicated tear sound: 3-phase — tension drone, rip burst, trailing crackles
+  function playTearSound() {
+    if (!audioCtx) {
+      initAudio();
+      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    }
+    if (!audioCtx) return;
+    const profile = BAGS[currentBagIdx].audio;
+    const now = audioCtx.currentTime;
+
+    // Phase 1: Tension drone (low frequency, rising pitch)
+    const droneDur = 0.25;
+    const droneBuf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * droneDur), audioCtx.sampleRate);
+    fillBrownNoise(droneBuf.getChannelData(0));
+    const droneSrc = audioCtx.createBufferSource();
+    droneSrc.buffer = droneBuf;
+    const droneFilter = audioCtx.createBiquadFilter();
+    droneFilter.type = 'bandpass';
+    droneFilter.frequency.setValueAtTime(200, now);
+    droneFilter.frequency.linearRampToValueAtTime(900, now + droneDur);
+    droneFilter.Q.value = 3;
+    const droneGain = audioCtx.createGain();
+    droneGain.gain.setValueAtTime(0.01, now);
+    droneGain.gain.linearRampToValueAtTime(0.4, now + droneDur * 0.9);
+    droneGain.gain.linearRampToValueAtTime(0, now + droneDur);
+    droneSrc.connect(droneFilter); droneFilter.connect(droneGain); droneGain.connect(masterGain);
+    droneSrc.start(now); droneSrc.stop(now + droneDur);
+
+    // Phase 2: Main rip burst — violent white+pink noise with high-freq bias
+    const ripStart = now + droneDur * 0.85;
+    const ripDur = 0.55;
+    const ripBuf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * ripDur), audioCtx.sampleRate);
+    const ripData = ripBuf.getChannelData(0);
+    fillWhiteNoise(ripData);
+    // Add dense crackles throughout
+    for (let i = 0; i < ripData.length; i++) {
+      const t = i / ripData.length;
+      const env = Math.pow(1 - t, 0.7);
+      const crackle = Math.random() < 0.04 ? (Math.random() - 0.5) * 1.8 : 0;
+      ripData[i] = (ripData[i] * 0.6 + crackle) * env;
+    }
+    const ripSrc = audioCtx.createBufferSource();
+    ripSrc.buffer = ripBuf;
+    const ripFilter = audioCtx.createBiquadFilter();
+    ripFilter.type = 'bandpass';
+    ripFilter.frequency.value = profile.freq * 1.3;
+    ripFilter.Q.value = 0.6;
+    const ripShelf = audioCtx.createBiquadFilter();
+    ripShelf.type = 'highshelf';
+    ripShelf.frequency.value = 4000;
+    ripShelf.gain.value = 8;
+    const ripGain = audioCtx.createGain();
+    ripGain.gain.value = 0.9;
+    ripSrc.connect(ripFilter); ripFilter.connect(ripShelf); ripShelf.connect(ripGain); ripGain.connect(masterGain);
+    ripSrc.start(ripStart); ripSrc.stop(ripStart + ripDur);
+
+    // Phase 3: Trailing crackles (sparse discrete clicks after main rip)
+    const trailStart = ripStart + ripDur * 0.6;
+    for (let i = 0; i < 6; i++) {
+      const t0 = trailStart + i * 0.08 + Math.random() * 0.05;
+      const clickDur = 0.04;
+      const clickBuf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * clickDur), audioCtx.sampleRate);
+      const cd = clickBuf.getChannelData(0);
+      for (let j = 0; j < cd.length; j++) {
+        cd[j] = (Math.random() * 2 - 1) * Math.pow(1 - j/cd.length, 2) * 0.7;
+      }
+      const cs = audioCtx.createBufferSource();
+      cs.buffer = clickBuf;
+      const cbp = audioCtx.createBiquadFilter();
+      cbp.type = 'bandpass';
+      cbp.frequency.value = 3500 + Math.random() * 3000;
+      cbp.Q.value = 2;
+      const cg = audioCtx.createGain();
+      cg.gain.value = 0.5 * Math.pow(0.8, i);
+      cs.connect(cbp); cbp.connect(cg); cg.connect(masterGain);
+      cs.start(t0); cs.stop(t0 + clickDur);
+    }
+  }
+
   function playSwipeSound() {
     if (!audioCtx) return;
     playRustleBurst(0.4);
@@ -525,6 +761,7 @@
   }
 
   function doRustle(px, py, intensity) {
+    if (isTorn) return;  // no more interaction after tear
     initAudio();
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
     count++;
@@ -548,10 +785,8 @@
       const dyr = restY[i] - cy;
       const chaosAng = Math.random() * Math.PI * 2;
       const chaosMag = 8 + Math.random() * 18;
-      const chaosX = Math.cos(chaosAng) * chaosMag;
-      const chaosY = Math.sin(chaosAng) * chaosMag;
-      permX[i] = -dxr * (1 - SHRINK) + chaosX;
-      permY[i] = -dyr * (1 - SHRINK) + chaosY;
+      permX[i] = -dxr * (1 - SHRINK) + Math.cos(chaosAng) * chaosMag;
+      permY[i] = -dyr * (1 - SHRINK) + Math.sin(chaosAng) * chaosMag;
       velX[i] += -dxr * 0.12 + (Math.random() - 0.5) * 20;
       velY[i] += -dyr * 0.12 + (Math.random() - 0.5) * 20;
     }
@@ -562,6 +797,7 @@
     if (navigator.vibrate) {
       try { navigator.vibrate([80, 30, 100, 30, 80, 30, 60, 30, 160]); } catch (e) {}
     }
+    hint.textContent = 'swipe fast to tear';
   }
 
   function eventToLocal(e) {
@@ -571,30 +807,61 @@
     return { x, y };
   }
 
+  // === INPUT ===
+  // Tap vs swipe vs fast-tear-swipe vs rustle-drag
   let swipeStart = null;
-  const SWIPE_MIN_DIST = 80;
-  const SWIPE_MAX_OFFAXIS = 60;
+  const SWIPE_MIN_DIST = 80;      // min distance for bag-switch swipe
+  const SWIPE_MAX_OFFAXIS = 60;   // max vertical deviation for horizontal swipe
   const TAP_MAX_DIST = 10;
   const TAP_MAX_TIME = 300;
+  const TEAR_MIN_SPEED = 1.8;     // px/ms threshold for tear swipe
+  const TEAR_MIN_DIST = 120;      // must cross most of the bag
+
+  // Track recent motion for velocity
+  const motionSamples = [];
 
   let lastPointer = { x: 0, y: 0, t: 0 };
   stage.addEventListener('pointerdown', (e) => {
     if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.classList.contains('dot')) return;
     e.preventDefault();
     const p = eventToLocal(e);
-    swipeStart = { x: e.clientX, y: e.clientY, t: performance.now(), resolved: false };
+    swipeStart = { x: e.clientX, y: e.clientY, localX: p.x, localY: p.y, t: performance.now(), resolved: false };
     lastPointer = { x: p.x, y: p.y, t: performance.now() };
+    motionSamples.length = 0;
+    motionSamples.push({ x: e.clientX, y: e.clientY, t: performance.now() });
   });
 
   stage.addEventListener('pointerup', (e) => {
     stopRubRustle();
-    if (!swipeStart || swipeStart.resolved) { swipeStart = null; return; }
+    if (!swipeStart) return;
     const dx = e.clientX - swipeStart.x;
     const dy = e.clientY - swipeStart.y;
     const dist = Math.sqrt(dx*dx + dy*dy);
     const dt = performance.now() - swipeStart.t;
 
+    // === TEAR detection: only when bag is crumpled, requires fast swipe across bag ===
+    if (isCrumpled && !isTorn && dist >= TEAR_MIN_DIST) {
+      // Compute peak speed over the gesture
+      let peakSpeed = 0;
+      for (let i = 1; i < motionSamples.length; i++) {
+        const s0 = motionSamples[i-1], s1 = motionSamples[i];
+        const d = Math.sqrt((s1.x-s0.x)**2 + (s1.y-s0.y)**2);
+        const dtm = s1.t - s0.t || 1;
+        const sp = d / dtm;
+        if (sp > peakSpeed) peakSpeed = sp;
+      }
+      if (peakSpeed >= TEAR_MIN_SPEED) {
+        const endLocal = eventToLocal(e);
+        triggerTear(swipeStart.localX, swipeStart.localY, endLocal.x, endLocal.y);
+        swipeStart = null;
+        return;
+      }
+    }
+
+    if (swipeStart.resolved) { swipeStart = null; return; }
+
     if (Math.abs(dx) >= SWIPE_MIN_DIST && Math.abs(dy) <= SWIPE_MAX_OFFAXIS) {
+      // Horizontal swipe → switch bag
       if (dx < 0) {
         const nextIdx = (currentBagIdx + 1) % BAGS.length;
         switchBag(nextIdx, 'right');
@@ -603,6 +870,7 @@
         switchBag(prevIdx, 'left');
       }
     } else if (dist <= TAP_MAX_DIST && dt <= TAP_MAX_TIME) {
+      // Tap
       const p = eventToLocal(e);
       const pressure = e.pressure > 0 ? e.pressure : 0.5;
       const intensity = Math.min(1, 0.55 + pressure * 0.45 + Math.random() * 0.1);
@@ -618,6 +886,10 @@
   stage.addEventListener('pointermove', (e) => {
     if (!(e.buttons > 0 || e.pressure > 0)) { stopRubRustle(); return; }
     const now = performance.now();
+    // Track motion for tear speed detection
+    motionSamples.push({ x: e.clientX, y: e.clientY, t: now });
+    if (motionSamples.length > 10) motionSamples.shift();
+
     const dt = now - lastPointer.t;
     if (dt < 14) return;
     const p = eventToLocal(e);
@@ -633,10 +905,10 @@
       const totalDist = Math.sqrt(totalDx*totalDx + totalDy*totalDy);
       if (totalDist > TAP_MAX_DIST) {
         const isHorizontalSwipe = Math.abs(totalDx) > Math.abs(totalDy) * 1.5 && Math.abs(totalDy) < SWIPE_MAX_OFFAXIS;
-        if (!isHorizontalSwipe) {
+        // Don't commit to rustle if it might be a tear swipe (bag is crumpled)
+        if (!isHorizontalSwipe && !isCrumpled) {
           swipeStart.resolved = true;
-          const startLocal = eventToLocal({ clientX: swipeStart.x, clientY: swipeStart.y });
-          doRustle(startLocal.x, startLocal.y, 0.5);
+          doRustle(swipeStart.localX, swipeStart.localY, 0.5);
         } else {
           return;
         }
@@ -645,6 +917,7 @@
       }
     }
 
+    if (isTorn) return;
     if (speed > 0.1) { initAudio(); updateRubRustle(speed); } else { stopRubRustle(); }
     if (speed > 0.25 && now > rubCooldown) {
       const intensity = Math.min(1, 0.3 + speed * 0.5);
