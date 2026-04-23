@@ -515,50 +515,44 @@
     if (broke === 0) return;
     isTorn = true;
 
+    // Ensure audio is up before we try to play the tear sound
+    initAudio();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+
     // Determine tear direction and perpendicular normal
     const tdx = x2 - x1, tdy = y2 - y1;
     const tlen = Math.sqrt(tdx*tdx + tdy*tdy) || 1;
     const nx = -tdy / tlen, ny = tdx / tlen;
 
-    // Midpoint of tear line
-    const mcx = (x1 + x2) / 2;
-    const mcy = (y1 + y2) / 2;
+    // For every vertex that lost an edge in this tear, nudge it slightly away
+    // from the line. This creates a visible gap/crack without flinging halves apart.
+    const SEPARATION = 4;   // pixels of gap created at the crack
+    const VEL_KICK = 2.5;   // tiny visible ripple
 
-    // Only affect vertices within a corridor around the tear line,
-    // and falloff with distance from the line itself
-    const INFLUENCE = 80;  // pixels perpendicular to line
-
-    for (let i = 0; i < NV; i++) {
-      // Distance from vertex to infinite line through (mcx,mcy) with normal (nx,ny)
-      const rx = posX[i] - mcx;
-      const ry = posY[i] - mcy;
-      const perpDist = rx * nx + ry * ny;  // signed distance to line (sign = which side)
-      const absDist = Math.abs(perpDist);
-
-      // Also check that vertex is near the line segment (not too far along tangent)
-      const tangent = (rx * tdx + ry * tdy) / tlen;
-      if (tangent < -tlen * 0.4 || tangent > tlen * 1.4) continue;
-
-      if (absDist > INFLUENCE) continue;
-      const falloff = 1 - absDist / INFLUENCE;
-      const direction = perpDist > 0 ? 1 : -1;
-
-      // Shift rest position so vertex settles in new spot (the bag stays torn)
-      const pushAmount = 25 * falloff;
-      restX[i] += nx * direction * pushAmount;
-      restY[i] += ny * direction * pushAmount;
-
-      // Velocity impulse for the visible "flying apart" moment
-      velX[i] += nx * direction * 10 * falloff + (Math.random() - 0.5) * 4;
-      velY[i] += ny * direction * 10 * falloff + (Math.random() - 0.5) * 4;
+    // Find vertices touched by this tear (endpoints of broken edges)
+    const affected = new Set();
+    for (let e = 0; e < NUM_EDGES; e++) {
+      if (!edges[e].broken) continue;
+      affected.add(edges[e].a);
+      affected.add(edges[e].b);
     }
 
-    playTearSound();
-    if (navigator.vibrate) {
-      try { navigator.vibrate([20, 15, 40, 20, 80, 20, 60, 15, 200]); } catch(e) {}
-    }
-    kickLoop();
-  }
+    affected.forEach(i => {
+      // Which side of the line is this vertex on?
+      // Use midpoint of current tear line for reference
+      const rx = posX[i] - (x1 + x2) / 2;
+      const ry = posY[i] - (y1 + y2) / 2;
+      const perpDist = rx * nx + ry * ny;
+      const direction = perpDist >= 0 ? 1 : -1;
+
+      // Nudge rest position so the crack stays open
+      restX[i] += nx * direction * SEPARATION + (Math.random() - 0.5) * 2;
+      restY[i] += ny * direction * SEPARATION + (Math.random() - 0.5) * 2;
+
+      // Small velocity kick for the crack "pop" animation
+      velX[i] += nx * direction * VEL_KICK + (Math.random() - 0.5) * 1.5;
+      velY[i] += ny * direction * VEL_KICK + (Math.random() - 0.5) * 1.5;
+    });
 
     playTearSound();
     if (navigator.vibrate) {
@@ -797,8 +791,10 @@
   const SWIPE_MAX_OFFAXIS = 60;   // max vertical deviation for horizontal swipe
   const TAP_MAX_DIST = 10;
   const TAP_MAX_TIME = 300;
-  const TEAR_MIN_SPEED = 0.7;     // px/ms threshold for tear swipe (works with mouse)
-  const TEAR_MIN_DIST = 100;      // must cross most of the bag
+  const TEAR_MIN_SPEED = 1.6;     // px/ms — needs a genuinely fast flick
+  const TEAR_MIN_DIST = 180;      // must traverse most of the bag
+  const TEAR_MAX_TIME = 220;      // whole gesture must be quick, not a slow drag
+  const TEAR_STRAIGHTNESS = 0.85; // straight-line / path-length ratio (1.0 = perfectly straight)
 
   // Track recent motion for velocity
   const motionSamples = [];
@@ -825,18 +821,24 @@
     const dist = Math.sqrt(dx*dx + dy*dy);
     const dt = performance.now() - swipeStart.t;
 
-    // === TEAR detection: fast swipe across bag tears it (works anytime, multiple tears OK) ===
-    if (dist >= TEAR_MIN_DIST) {
-      // Compute peak speed over the gesture
+    // === TEAR detection: genuinely fast, straight, committed flick across the bag ===
+    if (dist >= TEAR_MIN_DIST && dt <= TEAR_MAX_TIME) {
+      // Compute peak speed AND total path length (for straightness check)
       let peakSpeed = 0;
+      let pathLength = 0;
       for (let i = 1; i < motionSamples.length; i++) {
         const s0 = motionSamples[i-1], s1 = motionSamples[i];
         const d = Math.sqrt((s1.x-s0.x)**2 + (s1.y-s0.y)**2);
         const dtm = s1.t - s0.t || 1;
         const sp = d / dtm;
         if (sp > peakSpeed) peakSpeed = sp;
+        pathLength += d;
       }
-      if (peakSpeed >= TEAR_MIN_SPEED) {
+      // Straightness = straight-line distance / actual path length
+      // 1.0 = perfectly straight, lower = wobbly/dragged
+      const straightness = pathLength > 0 ? dist / pathLength : 0;
+
+      if (peakSpeed >= TEAR_MIN_SPEED && straightness >= TEAR_STRAIGHTNESS) {
         const endLocal = eventToLocal(e);
         triggerTear(swipeStart.localX, swipeStart.localY, endLocal.x, endLocal.y);
         swipeStart = null;
