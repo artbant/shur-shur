@@ -186,6 +186,9 @@
 
   const restX = new Float32Array(NV);
   const restY = new Float32Array(NV);
+  // Original rest positions — never changes, used for full reset
+  const origRestX = new Float32Array(NV);
+  const origRestY = new Float32Array(NV);
   const posX = new Float32Array(NV);
   const posY = new Float32Array(NV);
   const velX = new Float32Array(NV);
@@ -203,6 +206,7 @@
       const x = BAG_LEFT + u * BAG_W;
       const y = BAG_TOP + v * BAG_H;
       restX[i] = x; restY[i] = y;
+      origRestX[i] = x; origRestY[i] = y;
       posX[i] = x; posY[i] = y;
       uvU[i] = u; uvV[i] = v;
     }
@@ -288,8 +292,6 @@
   const gravityActive = new Uint8Array(NV);
 
   let count = 0;
-  const CRUMPLE_THRESHOLD = 150;
-  let isCrumpled = false;
   let isTorn = false;
   let imgReady = false;
   let currentBagIdx = 0;
@@ -312,15 +314,16 @@
 
   function resetState() {
     for (let i = 0; i < NV; i++) {
-      posX[i] = restX[i];
-      posY[i] = restY[i];
+      restX[i] = origRestX[i];
+      restY[i] = origRestY[i];
+      posX[i] = origRestX[i];
+      posY[i] = origRestY[i];
       velX[i] = 0; velY[i] = 0;
       permX[i] = 0; permY[i] = 0;
       gravityActive[i] = 0;
     }
     for (let e = 0; e < NUM_EDGES; e++) edges[e].broken = false;
     count = 0;
-    isCrumpled = false;
     isTorn = false;
     updateCounter();
   }
@@ -396,9 +399,8 @@
     for (let i = 0; i < NV; i++) {
       const targetX = restX[i] + permX[i];
       const targetY = restY[i] + permY[i];
-      velX[i] += (targetX - posX[i]) * SPRING_K * (gravityActive[i] ? 0 : 1);
-      velY[i] += (targetY - posY[i]) * SPRING_K * (gravityActive[i] ? 0 : 1);
-      if (gravityActive[i]) velY[i] += GRAVITY;
+      velX[i] += (targetX - posX[i]) * SPRING_K;
+      velY[i] += (targetY - posY[i]) * SPRING_K;
     }
     // Neighbor constraints via edge list (respects broken edges)
     for (let i = 0; i < NV; i++) {
@@ -432,17 +434,6 @@
       permX[i] *= PERM_DECAY;
       permY[i] *= PERM_DECAY;
     }
-    // Keep torn fragments alive until they fall off-screen
-    if (isTorn) {
-      let anyVisible = false;
-      for (let i = 0; i < NV; i++) {
-        if (gravityActive[i] && posY[i] < DISP_H + 100) {
-          anyVisible = true;
-          break;
-        }
-      }
-      if (anyVisible) maxDelta = Math.max(maxDelta, 1);
-    }
     return maxDelta;
   }
 
@@ -463,7 +454,6 @@
     const strength = 22 + intensity * 30;
     const seed = Math.random() * 1000;
     for (let i = 0; i < NV; i++) {
-      if (gravityActive[i]) continue;  // don't push falling pieces
       const dx = posX[i] - px;
       const dy = posY[i] - py;
       const dist2 = dx*dx + dy*dy;
@@ -481,7 +471,8 @@
       permX[i] += dirX * strength * fall * 0.35;
       permY[i] += dirY * strength * fall * 0.35;
       const curMag = Math.sqrt(permX[i]*permX[i] + permY[i]*permY[i]);
-      const maxPerm = isCrumpled ? 300 : 25;
+      // Progressive deformation: grows smoothly with touches, capped for sanity
+      const maxPerm = Math.min(200, 25 + count * 1.2);
       if (curMag > maxPerm) {
         permX[i] *= maxPerm / curMag;
         permY[i] *= maxPerm / curMag;
@@ -492,7 +483,7 @@
 
   // === TEAR mechanic ===
   // Break all edges whose segment crosses a given line segment (x1,y1)-(x2,y2)
-  // Only works after isCrumpled (tearing requires bag to already be stressed/weakened)
+  // Works anytime — multiple tears welcome, bag can be shredded progressively
   function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
     // Returns true if segment AB intersects segment CD
     const d1x = bx - ax, d1y = by - ay;
@@ -519,31 +510,55 @@
   }
 
   function triggerTear(x1, y1, x2, y2) {
-    if (isTorn) return;
-    isTorn = true;
-    // Break edges along the swipe path
+    // Break edges along the swipe path (can be called multiple times)
     const broke = tearAlongPath(x1, y1, x2, y2);
     if (broke === 0) return;
+    isTorn = true;
 
-    // Determine which side of the tear line each vertex is on,
-    // give them opposite momentum perpendicular to tear direction
+    // Determine tear direction and perpendicular normal
     const tdx = x2 - x1, tdy = y2 - y1;
     const tlen = Math.sqrt(tdx*tdx + tdy*tdy) || 1;
-    // Normal vector (perpendicular to tear direction)
     const nx = -tdy / tlen, ny = tdx / tlen;
 
+    // Midpoint of tear line
+    const mcx = (x1 + x2) / 2;
+    const mcy = (y1 + y2) / 2;
+
+    // Only affect vertices within a corridor around the tear line,
+    // and falloff with distance from the line itself
+    const INFLUENCE = 80;  // pixels perpendicular to line
+
     for (let i = 0; i < NV; i++) {
-      // Dot product with normal = which side we're on
-      const rx = posX[i] - (x1 + x2) / 2;
-      const ry = posY[i] - (y1 + y2) / 2;
-      const side = rx * nx + ry * ny;
-      const direction = side > 0 ? 1 : -1;
-      // Impulse perpendicular to tear + gravity activation
-      velX[i] += nx * direction * 6 + (Math.random() - 0.5) * 3;
-      velY[i] += ny * direction * 6 + (Math.random() - 0.5) * 3;
-      // After delay, activate gravity
-      gravityActive[i] = 1;
+      // Distance from vertex to infinite line through (mcx,mcy) with normal (nx,ny)
+      const rx = posX[i] - mcx;
+      const ry = posY[i] - mcy;
+      const perpDist = rx * nx + ry * ny;  // signed distance to line (sign = which side)
+      const absDist = Math.abs(perpDist);
+
+      // Also check that vertex is near the line segment (not too far along tangent)
+      const tangent = (rx * tdx + ry * tdy) / tlen;
+      if (tangent < -tlen * 0.4 || tangent > tlen * 1.4) continue;
+
+      if (absDist > INFLUENCE) continue;
+      const falloff = 1 - absDist / INFLUENCE;
+      const direction = perpDist > 0 ? 1 : -1;
+
+      // Shift rest position so vertex settles in new spot (the bag stays torn)
+      const pushAmount = 25 * falloff;
+      restX[i] += nx * direction * pushAmount;
+      restY[i] += ny * direction * pushAmount;
+
+      // Velocity impulse for the visible "flying apart" moment
+      velX[i] += nx * direction * 10 * falloff + (Math.random() - 0.5) * 4;
+      velY[i] += ny * direction * 10 * falloff + (Math.random() - 0.5) * 4;
     }
+
+    playTearSound();
+    if (navigator.vibrate) {
+      try { navigator.vibrate([20, 15, 40, 20, 80, 20, 60, 15, 200]); } catch(e) {}
+    }
+    kickLoop();
+  }
 
     playTearSound();
     if (navigator.vibrate) {
@@ -653,11 +668,9 @@
 
   // Dedicated tear sound: 3-phase — tension drone, rip burst, trailing crackles
   function playTearSound() {
-    if (!audioCtx) {
-      initAudio();
-      if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-    }
+    initAudio();
     if (!audioCtx) return;
+    if (audioCtx.state === 'suspended') audioCtx.resume();
     const profile = BAGS[currentBagIdx].audio;
     const now = audioCtx.currentTime;
 
@@ -761,43 +774,13 @@
   }
 
   function doRustle(px, py, intensity) {
-    if (isTorn) return;  // no more interaction after tear
     initAudio();
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
     count++;
     updateCounter();
-    if (count >= CRUMPLE_THRESHOLD && !isCrumpled) {
-      triggerFullCrumple();
-      return;
-    }
     applyImpact(px, py, intensity);
     playRustleBurst(intensity);
     vibrate(intensity);
-  }
-
-  function triggerFullCrumple() {
-    isCrumpled = true;
-    const cx = BAG_LEFT + BAG_W / 2;
-    const cy = BAG_TOP + BAG_H / 2;
-    const SHRINK = 0.28;
-    for (let i = 0; i < NV; i++) {
-      const dxr = restX[i] - cx;
-      const dyr = restY[i] - cy;
-      const chaosAng = Math.random() * Math.PI * 2;
-      const chaosMag = 8 + Math.random() * 18;
-      permX[i] = -dxr * (1 - SHRINK) + Math.cos(chaosAng) * chaosMag;
-      permY[i] = -dyr * (1 - SHRINK) + Math.sin(chaosAng) * chaosMag;
-      velX[i] += -dxr * 0.12 + (Math.random() - 0.5) * 20;
-      velY[i] += -dyr * 0.12 + (Math.random() - 0.5) * 20;
-    }
-    kickLoop();
-    for (let i = 0; i < 8; i++) {
-      setTimeout(() => playRustleBurst(0.8 + Math.random() * 0.2), i * 90);
-    }
-    if (navigator.vibrate) {
-      try { navigator.vibrate([80, 30, 100, 30, 80, 30, 60, 30, 160]); } catch (e) {}
-    }
-    hint.textContent = 'swipe fast to tear';
   }
 
   function eventToLocal(e) {
@@ -814,8 +797,8 @@
   const SWIPE_MAX_OFFAXIS = 60;   // max vertical deviation for horizontal swipe
   const TAP_MAX_DIST = 10;
   const TAP_MAX_TIME = 300;
-  const TEAR_MIN_SPEED = 1.8;     // px/ms threshold for tear swipe
-  const TEAR_MIN_DIST = 120;      // must cross most of the bag
+  const TEAR_MIN_SPEED = 0.7;     // px/ms threshold for tear swipe (works with mouse)
+  const TEAR_MIN_DIST = 100;      // must cross most of the bag
 
   // Track recent motion for velocity
   const motionSamples = [];
@@ -824,6 +807,9 @@
   stage.addEventListener('pointerdown', (e) => {
     if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.classList.contains('dot')) return;
     e.preventDefault();
+    // Initialize audio on first user interaction (browser gesture requirement)
+    initAudio();
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
     const p = eventToLocal(e);
     swipeStart = { x: e.clientX, y: e.clientY, localX: p.x, localY: p.y, t: performance.now(), resolved: false };
     lastPointer = { x: p.x, y: p.y, t: performance.now() };
@@ -839,8 +825,8 @@
     const dist = Math.sqrt(dx*dx + dy*dy);
     const dt = performance.now() - swipeStart.t;
 
-    // === TEAR detection: only when bag is crumpled, requires fast swipe across bag ===
-    if (isCrumpled && !isTorn && dist >= TEAR_MIN_DIST) {
+    // === TEAR detection: fast swipe across bag tears it (works anytime, multiple tears OK) ===
+    if (dist >= TEAR_MIN_DIST) {
       // Compute peak speed over the gesture
       let peakSpeed = 0;
       for (let i = 1; i < motionSamples.length; i++) {
@@ -888,7 +874,7 @@
     const now = performance.now();
     // Track motion for tear speed detection
     motionSamples.push({ x: e.clientX, y: e.clientY, t: now });
-    if (motionSamples.length > 10) motionSamples.shift();
+    if (motionSamples.length > 30) motionSamples.shift();
 
     const dt = now - lastPointer.t;
     if (dt < 14) return;
@@ -905,19 +891,28 @@
       const totalDist = Math.sqrt(totalDx*totalDx + totalDy*totalDy);
       if (totalDist > TAP_MAX_DIST) {
         const isHorizontalSwipe = Math.abs(totalDx) > Math.abs(totalDy) * 1.5 && Math.abs(totalDy) < SWIPE_MAX_OFFAXIS;
-        // Don't commit to rustle if it might be a tear swipe (bag is crumpled)
-        if (!isHorizontalSwipe && !isCrumpled) {
+        // Compute current peak speed — if movement is fast, might be a tear swipe, don't commit to rustle yet
+        let peakSpeed = 0;
+        for (let i = 1; i < motionSamples.length; i++) {
+          const s0 = motionSamples[i-1], s1 = motionSamples[i];
+          const d = Math.sqrt((s1.x-s0.x)**2 + (s1.y-s0.y)**2);
+          const dtm = s1.t - s0.t || 1;
+          const sp = d / dtm;
+          if (sp > peakSpeed) peakSpeed = sp;
+        }
+        const mightBeTear = peakSpeed >= TEAR_MIN_SPEED * 0.7;  // hold off on rustling if near tear speed
+        if (!isHorizontalSwipe && !mightBeTear) {
+          // Definitely a slow drag = rustling
           swipeStart.resolved = true;
           doRustle(swipeStart.localX, swipeStart.localY, 0.5);
         } else {
-          return;
+          return;  // wait and see — could be horizontal-swipe or tear
         }
       } else {
         return;
       }
     }
 
-    if (isTorn) return;
     if (speed > 0.1) { initAudio(); updateRubRustle(speed); } else { stopRubRustle(); }
     if (speed > 0.25 && now > rubCooldown) {
       const intensity = Math.min(1, 0.3 + speed * 0.5);
